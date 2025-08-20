@@ -2,7 +2,7 @@
 import * as child_process from "child_process";
 import * as fs from "fs";
 import * as path from "path";
-import { pathToFileURL } from "url";
+import { pathToFileURL, fileURLToPath } from "url";
 import { performance } from "perf_hooks";
 import * as lsp from "vscode-languageserver-protocol";
 import * as lsp_node from "vscode-languageserver-protocol/node";
@@ -24,18 +24,39 @@ interface Measurement {
     file: string;
     line: number;
     column: number;
+    endLine: number;
+    endColumn: number;
     time: number;
-    numberOfResults: number;
+    results: lsp.Location[] | lsp.LocationLink[] | lsp.CompletionItem[]
 }
 
 type Reporter = (measurement: Measurement) => void;
 
 namespace Reporters {
-    export function human({ file, line, column, time, numberOfResults }: Measurement) {
-        console.log(`${file}:${line}:${column} ${time} ms (${numberOfResults} results)`);
+    export function human({ file, line, column, time, results }: Measurement) {
+        console.log(`${file}:${line}:${column} ${time} ms (${results.length} results)`);
     }
-    export function csv({ file, line, column, time, numberOfResults }: Measurement) {
-        console.log(`${file}:${line}:${column},${time},${numberOfResults}`);
+    export function csv({ file, line, column, time, results }: Measurement) {
+        console.log(`${file}:${line}:${column},${time},${results.length}`);
+    }
+    export function yaml_jump({ file, line, column, endLine, endColumn, results }: Measurement) {
+        for (let result of results) {
+            let uri;
+            let range
+            if (lsp.Location.is(result)) {
+                uri = result.uri;
+                range = result.range;
+            } else if (lsp.LocationLink.is(result)) {
+                uri = result.targetUri;
+                range = result.targetRange;
+            } else {
+                continue
+            }
+            let sourcePath = path.relative(process.cwd(), fs.realpathSync(file));
+            let targetPath = path.relative(process.cwd(), fileURLToPath(uri));
+            let row = [sourcePath, line, column, endLine, endColumn, targetPath, range.start.line + 1, range.start.character + 1, range.end.line + 1, range.end.character + 1];
+            console.log(`   - ${JSON.stringify(row)}`);
+        }
     }
 }
 
@@ -163,6 +184,7 @@ async function main(config: Config) {
             let replacedWord = match[0];
             let matchEndIndex = matchIndex + replacedWord.length;
             let { line, column } = lineTable.get1BasedLineAndColumn(matchIndex);
+            let { line: endLine, column: endColumn } = lineTable.get1BasedLineAndColumn(matchEndIndex);
             if (commentRegex.test(lines[line - 1])) {
                 continue;
             }
@@ -212,21 +234,23 @@ async function main(config: Config) {
                 ],
             });
             let endTime = performance.now();
-            let numberOfResults: number;
+            let results: lsp.Location[] | lsp.LocationLink[] | lsp.CompletionItem[];
             if (!result) {
-                numberOfResults = 0;
+                results = [];
             } else if (Array.isArray(result)) {
-                numberOfResults = result.length;
+                results = result;
             } else if ('items' in result) {
-                numberOfResults = result.items.length;
+                results = result.items;
             } else {
-                numberOfResults = 1;
+                results = [result];
             }
             reporter({
                 file,
                 line,
                 column,
-                numberOfResults,
+                endLine,
+                endColumn,
+                results,
                 time: Math.round(endTime - startTime)
             });
         }
